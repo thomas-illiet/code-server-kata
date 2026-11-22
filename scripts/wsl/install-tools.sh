@@ -17,7 +17,7 @@ if (($#)); then
 fi
 
 is_wsl2 || die 'ce script installe les outils dans une distribution WSL2'
-[[ "$(dpkg --print-architecture)" == amd64 ]] || die 'seule l’architecture amd64 est prise en charge'
+[[ "$(dpkg --print-architecture)" == amd64 ]] || die "seule l'architecture amd64 est prise en charge"
 
 KUBERNETES_VERSION="$(version_value KubernetesVersion)"
 SUDO=()

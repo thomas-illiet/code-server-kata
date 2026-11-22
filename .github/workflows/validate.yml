@@ -1,0 +1,122 @@
+name: Validate repository
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux and WSL path
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the pinned kubectl client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -nE "s/^[[:space:]]*KubernetesVersion[[:space:]]*=[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" versions.psd1)"
+          test -n "${version}"
+          bin_dir="${RUNNER_TEMP}/bin"
+          mkdir -p "${bin_dir}"
+          curl --fail --location --retry 5 \
+            --output "${bin_dir}/kubectl" \
+            "https://dl.k8s.io/release/v${version}/bin/linux/amd64/kubectl"
+          curl --fail --location --retry 5 \
+            --output "${RUNNER_TEMP}/kubectl.sha256" \
+            "https://dl.k8s.io/release/v${version}/bin/linux/amd64/kubectl.sha256"
+          printf '%s  %s\n' \
+            "$(tr -d '[:space:]' < "${RUNNER_TEMP}/kubectl.sha256")" \
+            "${bin_dir}/kubectl" | sha256sum --check --strict
+          chmod 0755 "${bin_dir}/kubectl"
+          printf '%s\n' "${bin_dir}" >> "${GITHUB_PATH}"
+
+      - name: Run the Linux static validation
+        shell: bash
+        run: make release-check
+
+  image:
+    name: Build the workspace image
+    runs-on: ubuntu-24.04
+    needs: linux
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build from the pinned inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version_value() {
+            sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" versions.psd1
+          }
+          docker build --pull --tag code-server-podman:ci \
+            --build-arg "BASE_IMAGE=$(version_value BaseImage)" \
+            --build-arg "CODE_SERVER_VERSION=$(version_value CodeServerVersion)" \
+            --build-arg "CODE_SERVER_AMD64_SHA256=$(version_value CodeServerAmd64Sha256)" \
+            --build-arg "SHADOW_VERSION=$(version_value ShadowVersion)" \
+            --build-arg "SHADOW_SHA256=$(version_value ShadowSha256)" \
+            --file container/Dockerfile .
+          docker run --rm --user 0 --entrypoint sh code-server-podman:ci -ec '
+            test ! -e /usr/bin/sudo
+            test "$(stat -c "%a %u:%g" /usr/bin/newuidmap)" = "4755 0:0"
+            test "$(stat -c "%a %u:%g" /usr/bin/newgidmap)" = "4755 0:0"
+            test "$(find /usr -xdev -type f -perm /6000 | wc -l)" -eq 2
+          '
+
+  windows:
+    name: Windows compatibility path
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pinned validation tools
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $versions = Import-PowerShellDataFile -LiteralPath .\versions.psd1
+          $binDirectory = Join-Path $env:RUNNER_TEMP 'bin'
+          New-Item -ItemType Directory -Path $binDirectory -Force | Out-Null
+
+          $kubectlUri = "https://dl.k8s.io/release/v$($versions.KubernetesVersion)/bin/windows/amd64/kubectl.exe"
+          $kubectlPath = Join-Path $binDirectory 'kubectl.exe'
+          Invoke-WebRequest -UseBasicParsing -Uri $kubectlUri -OutFile $kubectlPath
+          $kubectlExpected = (Invoke-WebRequest -UseBasicParsing -Uri "$kubectlUri.sha256").Content.Trim().ToLowerInvariant()
+          $kubectlActual = (Get-FileHash -LiteralPath $kubectlPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($kubectlActual -ne $kubectlExpected) {
+              throw 'kubectl checksum verification failed.'
+          }
+
+          $helmArchiveName = "helm-$($versions.HelmVersion)-windows-amd64.zip"
+          $helmArchive = Join-Path $env:RUNNER_TEMP $helmArchiveName
+          $helmUri = "https://get.helm.sh/$helmArchiveName"
+          Invoke-WebRequest -UseBasicParsing -Uri $helmUri -OutFile $helmArchive
+          $helmChecksumLine = (Invoke-WebRequest -UseBasicParsing -Uri "$helmUri.sha256sum").Content.Trim()
+          $helmExpected = ($helmChecksumLine -split '\s+')[0].ToLowerInvariant()
+          $helmActual = (Get-FileHash -LiteralPath $helmArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($helmActual -ne $helmExpected) {
+              throw 'Helm checksum verification failed.'
+          }
+          $helmExtract = Join-Path $env:RUNNER_TEMP 'helm'
+          Expand-Archive -LiteralPath $helmArchive -DestinationPath $helmExtract -Force
+          Copy-Item -LiteralPath (Join-Path $helmExtract 'windows-amd64\helm.exe') -Destination $binDirectory
+
+          $binDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run the PowerShell static validation
+        shell: pwsh
+        run: .\tests\Test-Static.ps1 -RenderHelmChart

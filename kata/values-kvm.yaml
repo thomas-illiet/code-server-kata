@@ -1,0 +1,14 @@
+deploymentMode: job
+
+job:
+  nodes:
+    - code-kata-control-plane
+
+shims:
+  disableAll: true
+  qemu-runtime-rs:
+    enabled: true
+
+runtimeClasses:
+  enabled: true
+  createDefault: false

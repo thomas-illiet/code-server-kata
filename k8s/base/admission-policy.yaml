@@ -1,0 +1,99 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: require-kata-code-server-isolation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods, pods/ephemeralcontainers]
+        scope: Namespaced
+  validations:
+    - expression: >-
+        has(object.spec.runtimeClassName) &&
+        object.spec.runtimeClassName in [
+          'kata-qemu-runtime-rs',
+          'kata-clh-azure-runtime-rs'
+        ]
+      message: Pods in a Kata-enforced namespace must select an approved Kata RuntimeClass.
+    - expression: >-
+        (!has(object.spec.hostNetwork) || !object.spec.hostNetwork) &&
+        (!has(object.spec.hostPID) || !object.spec.hostPID) &&
+        (!has(object.spec.hostIPC) || !object.spec.hostIPC)
+      message: Host network, PID, and IPC namespaces are forbidden.
+    - expression: >-
+        !has(object.spec.volumes) ||
+        object.spec.volumes.all(volume, !has(volume.hostPath))
+      message: hostPath volumes are forbidden.
+    - expression: >-
+        has(object.spec.automountServiceAccountToken) &&
+        object.spec.automountServiceAccountToken == false
+      message: Service account token automounting must be explicitly disabled.
+    - expression: >-
+        object.spec.containers.all(container,
+          has(container.securityContext) &&
+          has(container.securityContext.runAsNonRoot) &&
+          container.securityContext.runAsNonRoot &&
+          has(container.securityContext.runAsUser) &&
+          container.securityContext.runAsUser == 1000 &&
+          has(container.securityContext.runAsGroup) &&
+          container.securityContext.runAsGroup == 1000
+        )
+      message: Every container must run with an explicit non-zero UID.
+    - expression: >-
+        object.spec.containers.size() == 1 &&
+        object.spec.containers[0].name == 'code-server' &&
+        (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+        (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0)
+      message: The workspace pod must contain exactly one code-server container and no init or ephemeral containers.
+    - expression: >-
+        has(object.spec.securityContext) &&
+        has(object.spec.securityContext.supplementalGroupsPolicy) &&
+        object.spec.securityContext.supplementalGroupsPolicy == 'Strict'
+      message: Image-defined supplemental groups must not be merged into the workspace process.
+    - expression: >-
+        object.spec.containers.all(container,
+          has(container.securityContext) &&
+          has(container.securityContext.privileged) &&
+          container.securityContext.privileged == false &&
+          has(container.securityContext.allowPrivilegeEscalation) &&
+          container.securityContext.allowPrivilegeEscalation == true &&
+          has(container.securityContext.readOnlyRootFilesystem) &&
+          container.securityContext.readOnlyRootFilesystem == true &&
+          (!has(container.securityContext.procMount) ||
+           container.securityContext.procMount == 'Default') &&
+          has(container.securityContext.seccompProfile) &&
+          container.securityContext.seccompProfile.type == 'Unconfined' &&
+          has(container.securityContext.capabilities) &&
+          has(container.securityContext.capabilities.drop) &&
+          container.securityContext.capabilities.drop.size() == 1 &&
+          container.securityContext.capabilities.drop[0] == 'ALL' &&
+          has(container.securityContext.capabilities.add) &&
+          container.securityContext.capabilities.add.size() == 2 &&
+          container.securityContext.capabilities.add.all(cap,
+            cap in ['SETGID', 'SETUID']) &&
+          ['SETGID', 'SETUID'].all(cap,
+            cap in container.securityContext.capabilities.add)
+        )
+      message: The code-server container must use only SETGID and SETUID in its bounding set and may not be privileged.
+    - expression: >-
+        object.spec.containers.all(container,
+          !has(container.ports) ||
+          container.ports.all(port, !has(port.hostPort) || port.hostPort == 0)
+        )
+      message: Pod containers may not request host ports.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: require-kata-code-server-isolation
+spec:
+  policyName: require-kata-code-server-isolation
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kata-isolation: required

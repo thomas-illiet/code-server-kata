@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ingress.yaml
+  - network-policy.yaml
+
+# Replace this reserved example reference with the immutable digest published
+# by your CI before applying this overlay.
+images:
+  - name: localhost/code-server-podman
+    newName: registry.example.invalid/code-server-podman
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

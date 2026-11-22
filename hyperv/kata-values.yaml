@@ -1,0 +1,12 @@
+deploymentMode: job
+
+k8sDistribution: k3s
+
+shims:
+  disableAll: true
+  qemu-runtime-rs:
+    enabled: true
+
+runtimeClasses:
+  enabled: true
+  createDefault: false

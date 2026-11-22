@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-server-podman
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: code-server-podman
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: code-server-podman
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: code-server-podman
+    spec:
+      runtimeClassName: kata-qemu-runtime-rs
+      serviceAccountName: code-server
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        supplementalGroupsPolicy: Strict
+      containers:
+        - name: code-server
+          image: localhost/code-server-podman:4.146.0-ubuntu24.04
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/start-code-server]
+          args: []
+          env:
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-auth
+                  key: PASSWORD
+            - name: XDG_RUNTIME_DIR
+              value: /tmp/run-user-1000
+            # Keep high-churn caches off the virtiofs-backed home PVC. The
+            # code-server user data and workspace remain persistent below.
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+            - name: TMPDIR
+              value: /tmp
+            - name: npm_config_cache
+              value: /tmp/cache/npm
+            - name: PIP_CACHE_DIR
+              value: /tmp/cache/pip
+            - name: GOCACHE
+              value: /tmp/cache/go-build
+            - name: CONTAINERS_STORAGE_CONF
+              value: /home/podman/.config/containers/storage.conf
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              ephemeral-storage: 10Gi
+            limits:
+              cpu: "6"
+              memory: 10Gi
+              ephemeral-storage: 60Gi
+          securityContext:
+            # Only the uidmap helpers may raise SETUID/SETGID from this
+            # bounding set; code-server keeps zero effective capabilities.
+            privileged: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            # Required for the two capability-aware setuid uidmap helpers.
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SETGID
+                - SETUID
+            procMount: Default
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: Unconfined
+          volumeMounts:
+            - name: developer-home
+              mountPath: /home/podman
+            - name: code-server-tmp
+              mountPath: /tmp
+            - name: code-server-var-tmp
+              mountPath: /var/tmp
+      volumes:
+        - name: developer-home
+          persistentVolumeClaim:
+            claimName: code-server-home
+        - name: code-server-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: code-server-var-tmp
+          emptyDir:
+            sizeLimit: 2Gi

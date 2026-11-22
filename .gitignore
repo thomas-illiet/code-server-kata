@@ -1,0 +1,17 @@
+.state/
+benchmark-results/
+*.kubeconfig
+*.log
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.age
+secrets/
+.DS_Store
+Thumbs.db

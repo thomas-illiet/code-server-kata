@@ -1,0 +1,99 @@
+name: Publish workspace image
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable release tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}-${{ inputs.tag || 'tag' }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the pinned kubectl client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -nE "s/^[[:space:]]*KubernetesVersion[[:space:]]*=[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" versions.psd1)"
+          test -n "${version}"
+          bin_dir="${RUNNER_TEMP}/bin"
+          mkdir -p "${bin_dir}"
+          curl --fail --location --retry 5 \
+            --output "${bin_dir}/kubectl" \
+            "https://dl.k8s.io/release/v${version}/bin/linux/amd64/kubectl"
+          expected="$(curl --fail --location --retry 5 \
+            "https://dl.k8s.io/release/v${version}/bin/linux/amd64/kubectl.sha256")"
+          printf '%s  %s\n' "${expected}" "${bin_dir}/kubectl" |
+            sha256sum --check --strict
+          chmod 0755 "${bin_dir}/kubectl"
+          printf '%s\n' "${bin_dir}" >> "${GITHUB_PATH}"
+
+      - name: Run release gates
+        shell: bash
+        run: make release-check
+
+      - name: Select immutable image references
+        id: image
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          release_tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          [[ "${release_tag}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          owner="$(tr '[:upper:]' '[:lower:]' <<<"${GITHUB_REPOSITORY_OWNER}")"
+          image="ghcr.io/${owner}/code-server-podman"
+          printf 'image=%s\n' "${image}" >> "${GITHUB_OUTPUT}"
+          printf 'tag=%s\n' "${release_tag}" >> "${GITHUB_OUTPUT}"
+          printf 'sha_tag=sha-%s\n' "${GITHUB_SHA:0:12}" >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "${GHCR_TOKEN}" |
+            docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and publish with SBOM and provenance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker buildx create --name release-builder --use
+          docker buildx inspect --bootstrap
+          version_value() {
+            sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" versions.psd1
+          }
+          docker buildx build --pull --platform linux/amd64 \
+            --provenance=mode=max --sbom=true \
+            --tag "${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}" \
+            --tag "${{ steps.image.outputs.image }}:${{ steps.image.outputs.sha_tag }}" \
+            --build-arg "BASE_IMAGE=$(version_value BaseImage)" \
+            --build-arg "CODE_SERVER_VERSION=$(version_value CodeServerVersion)" \
+            --build-arg "CODE_SERVER_AMD64_SHA256=$(version_value CodeServerAmd64Sha256)" \
+            --build-arg "SHADOW_VERSION=$(version_value ShadowVersion)" \
+            --build-arg "SHADOW_SHA256=$(version_value ShadowSha256)" \
+            --metadata-file "${RUNNER_TEMP}/build-metadata.json" \
+            --file container/Dockerfile --push .
+          digest="$(jq -er '."containerimage.digest"' "${RUNNER_TEMP}/build-metadata.json")"
+          {
+            printf '### Published image\n\n'
+            printf '`%s@%s`\n' "${{ steps.image.outputs.image }}" "${digest}"
+          } >> "${GITHUB_STEP_SUMMARY}"
